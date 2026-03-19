@@ -7,7 +7,7 @@ from stats import Stats
 
 do_patch()
 
-HOST = '0.0.0.0'
+HOST = '10.152.252.100'
 PORT = 5005
 
 stats = Stats()

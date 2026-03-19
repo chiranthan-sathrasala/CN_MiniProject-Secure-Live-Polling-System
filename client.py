@@ -8,7 +8,7 @@ from packet import create_packet
 
 do_patch()
 
-SERVER_HOST = "10.152.252.24"
+SERVER_HOST = "10.152.252.100"
 SERVER_PORT = 5005
 
 CANDIDATES = {1: "Alice", 2: "Bob", 3: "Charlie"}
