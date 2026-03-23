@@ -1,8 +1,10 @@
 import socket
 import threading
 import ssl
+import time
 
-# This "monkey patch" safely injects it back so the older dtls library doesn't crash.
+# This "monkey patch" safely injects wrap_socket back so the older dtls library
+# doesn't crash on Python 3.12+ where it was removed from the ssl module.
 if not hasattr(ssl, 'wrap_socket'):
     ssl.wrap_socket = ssl.SSLContext().wrap_socket
 
@@ -14,105 +16,199 @@ from stats import Stats
 # Patch the standard Python sockets to support UDP over DTLS
 do_patch()
 
-# HOST is set to 0.0.0.0 to listen on all available network interfaces (crucial for VMs)
+# HOST is 0.0.0.0 to listen on all available network interfaces (crucial for VMs).
 HOST = '0.0.0.0'
 PORT = 5005
 
+# Per-connection read timeout in seconds.
+# Prevents zombie threads from hanging indefinitely on slow/dead clients.
+CONN_TIMEOUT = 10
+
 stats = Stats()
-# We use a Lock to prevent race conditions. If multiple clients vote at the 
-# exact same millisecond, this lock ensures they don't corrupt the tally.
+# A Lock prevents race conditions when multiple clients vote concurrently.
 stats_lock = threading.Lock()
 
 CANDIDATES = {1: "Alice", 2: "Bob", 3: "Charlie"}
 
+
 def handle_secure_client(secure_conn, addr):
-    # Handles the secure communication and logic for a single client connection.
+    """
+    Handles the full lifecycle of one secure DTLS client connection:
+      - Read request
+      - Route to GET_RESULTS or vote handling
+      - Send acknowledgment / rejection
+      - Clean up
+    """
+    recv_time = time.time()  # start timing for latency measurement
     try:
-        # 1. Read the encrypted data from the client
-        data = secure_conn.read(1024)
-        # 2. Check if the client is just actively polling for live results
+        # Apply a per-connection timeout so we never block forever
+        secure_conn.settimeout(CONN_TIMEOUT)
+
+        # 1. Read the encrypted request from the client
+        try:
+            data = secure_conn.read(1024)
+        except ssl.SSLError as e:
+            print(f"[SSL ERROR] Handshake/read failed from {addr[0]}: {e}")
+            return
+        except socket.timeout:
+            print(f"[TIMEOUT] No data received from {addr[0]} within {CONN_TIMEOUT}s")
+            return
+
+        if not data:
+            print(f"[WARN] Empty data received from {addr[0]}, ignoring.")
+            return
+
+        # 2. Live results polling request
         if data == b"GET_RESULTS":
             with stats_lock:
                 results = stats.votes_per_candidate.copy()
-            # Format the live tally to send back
+                uptime = stats.uptime_seconds()
+                throughput = stats.throughput()
+
             lines = ["\n=== SECURE LIVE RESULTS ==="]
             for cid, name in CANDIDATES.items():
                 count = results.get(cid, 0)
-                lines.append(f"  {name}: {count} vote(s)")
+                bar = "█" * count
+                lines.append(f"  {name:<10}: {count:>3} vote(s)  {bar}")
+            lines.append(f"\n  Uptime: {uptime}s  |  Throughput: {throughput} votes/sec")
             lines.append("===========================\n")
-            secure_conn.write("\n".join(lines).encode())
+            try:
+                secure_conn.write("\n".join(lines).encode())
+            except Exception as e:
+                print(f"[ERROR] Failed to send results to {addr[0]}: {e}")
             return
-        # 3. If it is not a GET_RESULTS request, it must be a vote packet
+
+        # 3. All other data is treated as a vote packet
         with stats_lock:
             stats.record_received()
+
         # Parse the custom 19-byte binary packet
         parsed = parse_packet(data)
         if parsed is None:
             with stats_lock:
                 stats.record_corrupted()
-            print(f"[CORRUPTED] Packet received from {addr[0]}")
+            print(f"[CORRUPTED] Malformed packet from {addr[0]}")
+            try:
+                secure_conn.write(b"CORRUPTED")
+            except Exception:
+                pass
             return
-        voter_id = parsed['voter_id']
-        candidate = parsed['candidate_id']
-        seq_num = parsed['seq_num']
-        # 4. Safely check for duplicates and update the statistics
+
+        voter_id   = parsed['voter_id']
+        candidate  = parsed['candidate_id']
+        seq_num    = parsed['seq_num']
+        pkt_time   = parsed['timestamp']
+
+        # Guard against implausible timestamps (clock-skew / replay attack indicator)
+        server_time = int(time.time())
+        if abs(server_time - pkt_time) > 120:
+            print(f"[WARN] Suspicious timestamp from voter {voter_id} (skew={server_time - pkt_time}s)")
+
+        # 4. Validate candidate, check for duplicates, record vote — all under the lock
         with stats_lock:
             if stats.is_duplicate(voter_id):
                 stats.record_duplicate()
-                secure_conn.write(b"DUPLICATE")
                 print(f"[DUPLICATE] Voter {voter_id} already voted")
+                try:
+                    secure_conn.write(b"DUPLICATE")
+                except Exception:
+                    pass
                 return
+
             if candidate not in CANDIDATES:
-                secure_conn.write(b"INVALID_CANDIDATE")
+                print(f"[INVALID] Voter {voter_id} sent unknown candidate id={candidate}")
+                try:
+                    secure_conn.write(b"INVALID_CANDIDATE")
+                except Exception:
+                    pass
                 return
-            stats.record_vote(candidate)
+
+            # Measure end-to-end processing latency in milliseconds
+            latency_ms = (time.time() - recv_time) * 1000
+            stats.record_vote(candidate, latency_ms=latency_ms)
+
         name = CANDIDATES[candidate]
-        print(f"[SECURE VOTE] Voter {voter_id} securely voted for {name}")
-        # 5. Send a secure acknowledgment (ACK) back to the client
+        print(f"[VOTE] Voter {voter_id} voted for {name}  (latency={latency_ms:.2f}ms)")
+
+        # 5. Send a secure acknowledgment back
         ack = f"ACK:{seq_num}".encode()
-        secure_conn.write(ack)
+        try:
+            secure_conn.write(ack)
+        except Exception as e:
+            print(f"[ERROR] Failed to send ACK to voter {voter_id}: {e}")
+
     except Exception as e:
-        print(f"[ERROR] Connection issue with {addr[0]}: {e}")
+        print(f"[ERROR] Unexpected error handling {addr[0]}: {e}")
+
     finally:
-        # Always gracefully close the secure session when finished
-        secure_conn.shutdown()
-        secure_conn.close()
+        # Always close the secure session — even if an exception occurred above
+        try:
+            secure_conn.shutdown()
+            secure_conn.close()
+        except Exception:
+            pass
+
 
 def start_server():
-    # 1. Create a raw, low-level UDP socket
+    """
+    Initialises the raw UDP socket, wraps it in DTLS, and enters
+    the main accept-loop, spawning a daemon thread per client.
+    """
+    # 1. Create a raw UDP socket
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     raw_sock.bind((HOST, PORT))
-    # 2. Wrap the raw socket in a secure DTLS layer using our self-signed certificates
-    secure_server_sock = SSLConnection(
-        raw_sock,
-        keyfile="server.key",
-        certfile="server.crt",
-        server_side=True
-    )
-    print("=======================================")
-    print(" SECURE DTLS LIVE POLLING SERVER STARTED")
-    print(" Listening on port", PORT)
-    print("=======================================\n")
+
+    # 2. Wrap in DTLS using self-signed certificates
+    try:
+        secure_server_sock = SSLConnection(
+            raw_sock,
+            keyfile="server.key",
+            certfile="server.crt",
+            server_side=True
+        )
+    except Exception as e:
+        print(f"[FATAL] Could not initialise DTLS — check server.key / server.crt: {e}")
+        raw_sock.close()
+        return
+
+    print("=" * 45)
+    print("  SECURE DTLS LIVE POLLING SERVER STARTED")
+    print(f"  Listening on {HOST}:{PORT}")
+    print("=" * 45 + "\n")
+
     try:
         while True:
-            # Accept an incoming secure DTLS connection
-            secure_conn, addr = secure_server_sock.accept()
-            # Spawn a new daemon thread for each client to handle multiple voters concurrently
+            try:
+                # Accept an incoming secure DTLS connection
+                secure_conn, addr = secure_server_sock.accept()
+            except ssl.SSLError as e:
+                # DTLS handshake failure — log and keep accepting new clients
+                print(f"[SSL HANDSHAKE FAIL] {e}  — server continues.")
+                continue
+            except OSError as e:
+                print(f"[SOCKET ERROR] {e}  — server continues.")
+                continue
+
+            # Spawn a daemon thread so the main loop never blocks
             t = threading.Thread(
                 target=handle_secure_client,
-                args=(secure_conn, addr)
+                args=(secure_conn, addr),
+                daemon=True
             )
-            t.daemon = True
             t.start()
-            
+
     except KeyboardInterrupt:
-        print("\n[SERVER] Shutting down...")
-        # Print the final stats report when the professor ends the demo
+        print("\n[SERVER] Shutting down gracefully...")
         with stats_lock:
             stats.report()
+
     finally:
-        secure_server_sock.close()
+        try:
+            secure_server_sock.close()
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     start_server()
