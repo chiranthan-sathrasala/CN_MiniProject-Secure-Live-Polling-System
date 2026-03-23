@@ -20,10 +20,6 @@ do_patch()
 HOST = '0.0.0.0'
 PORT = 5005
 
-# Per-connection read timeout in seconds.
-# Prevents zombie threads from hanging indefinitely on slow/dead clients.
-CONN_TIMEOUT = 10
-
 stats = Stats()
 # A Lock prevents race conditions when multiple clients vote concurrently.
 stats_lock = threading.Lock()
@@ -41,17 +37,11 @@ def handle_secure_client(secure_conn, addr):
     """
     recv_time = time.time()  # start timing for latency measurement
     try:
-        # Apply a per-connection timeout so we never block forever
-        secure_conn.settimeout(CONN_TIMEOUT)
-
         # 1. Read the encrypted request from the client
         try:
             data = secure_conn.read(1024)
         except ssl.SSLError as e:
             print(f"[SSL ERROR] Handshake/read failed from {addr[0]}: {e}")
-            return
-        except socket.timeout:
-            print(f"[TIMEOUT] No data received from {addr[0]} within {CONN_TIMEOUT}s")
             return
 
         if not data:
