@@ -13,10 +13,6 @@ MAX_VOTER_ID = 0xFFFFFFFF  # 4-byte unsigned int max
 
 
 def create_packet(voter_id, seq_num, candidate_id):
-    """
-    Creates a 19-byte binary voting packet with checksum.
-    Raises ValueError for invalid inputs to prevent malformed packets.
-    """
     if not (0 < voter_id <= MAX_VOTER_ID):
         raise ValueError(f"voter_id must be between 1 and {MAX_VOTER_ID}")
     if candidate_id not in VALID_CANDIDATES:
@@ -35,10 +31,6 @@ def create_packet(voter_id, seq_num, candidate_id):
 
 
 def parse_packet(raw_data):
-    """
-    Parses and validates a raw 19-byte binary packet.
-    Returns a dict on success, or None on size mismatch / checksum failure.
-    """
     if len(raw_data) != PACKET_SIZE:
         print(f"[ERROR] Invalid packet size: {len(raw_data)} bytes (expected {PACKET_SIZE})")
         return None

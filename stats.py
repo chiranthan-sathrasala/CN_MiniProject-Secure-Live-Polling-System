@@ -3,11 +3,6 @@ import threading
 
 
 class Stats:
-    """
-    Thread-safe statistics tracker for the polling server.
-    Tracks vote counts, duplicates, corrupted packets, latency, and throughput.
-    """
-
     def __init__(self):
         self.total_received = 0
         self.total_duplicates = 0
@@ -20,18 +15,16 @@ class Stats:
         self._latencies = []                # per-vote processing latency in ms
         self._lock = threading.Lock()       # internal lock for latency list
 
-    # ---------- recording ----------
-
     def record_received(self):
-        """Called every time any packet arrives."""
+        # Called every time any packet arrives.
         self.total_received += 1
 
     def record_duplicate(self):
-        """Called when a duplicate voter_id is detected."""
+        # Called when a duplicate voter_id is detected.
         self.total_duplicates += 1
 
     def record_corrupted(self):
-        """Called when checksum verification fails."""
+        # Called when checksum verification fails.
         self.total_corrupted += 1
 
     def record_vote(self, candidate_id, latency_ms=None):
@@ -47,10 +40,8 @@ class Stats:
             with self._lock:
                 self._latencies.append(latency_ms)
 
-    # ---------- queries ----------
-
     def is_duplicate(self, voter_id):
-        """Returns True if voter already voted; registers them on first call."""
+        # Returns True if voter already voted; registers them on first call.
         if voter_id in self.voters_seen:
             return True
         self.voters_seen.add(voter_id)
@@ -63,14 +54,14 @@ class Stats:
         return round(time.time() - self._start_time, 2)
 
     def throughput(self):
-        """Valid votes per second since server started."""
+        # Valid votes per second since server started.
         elapsed = time.time() - self._start_time
         if elapsed == 0:
             return 0.0
         return round(self.total_valid_votes() / elapsed, 4)
 
     def calculate_loss(self, total_sent):
-        """Packet loss percentage relative to total_sent by client."""
+        # Packet loss percentage relative to total_sent by client.
         if total_sent == 0:
             return 0.0
         valid = self.total_received - self.total_duplicates - self.total_corrupted
@@ -78,7 +69,7 @@ class Stats:
         return round(loss, 2)
 
     def latency_stats(self):
-        """Returns (min, max, avg) latency in ms, or (0,0,0) if no data."""
+        # Returns (min, max, avg) latency in ms, or (0,0,0) if no data.
         with self._lock:
             if not self._latencies:
                 return 0.0, 0.0, 0.0
@@ -88,10 +79,8 @@ class Stats:
                 round(sum(self._latencies) / len(self._latencies), 3)
             )
 
-    # ---------- reporting ----------
-
     def report(self, total_sent=None):
-        """Prints a full stats report to stdout."""
+        # Prints a full stats report to stdout.
         lat_min, lat_max, lat_avg = self.latency_stats()
         print("\n" + "=" * 44)
         print("           POLLING STATS REPORT")
