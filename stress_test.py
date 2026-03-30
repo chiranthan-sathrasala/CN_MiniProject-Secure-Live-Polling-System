@@ -45,7 +45,6 @@ from packet import create_packet #custom fun used to build vote packet, returns 
 
 do_patch() #modifies python's socket system, after calling it , it converts the normal udp sockets --> dtls capable ones
 
-# ─── Shared results container ───────────────────────────────────────────────
 results_lock = threading.Lock() # this creates a mutex lock, since many threads will update the results without lock it will lead to data corruption, only one thread updates results at a time
 results = {
     "success":    0,
@@ -144,7 +143,6 @@ def run_stress_test(server_host, server_port, num_voters, inter_vote_delay_ms):
 
     elapsed = time.time() - t_wall_start
 
-    # ─── Report ────────────────────────────────────────────────────────────
     lats = results["latencies"] #store the latencies from the dictionary to lats for easier access
     total_attempted = num_voters
 
